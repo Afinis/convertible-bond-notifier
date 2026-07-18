@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -14,6 +15,9 @@ from .models import Bond
 
 class DataSourceError(RuntimeError):
     """Raised when Eastmoney cannot provide a trustworthy bond dataset."""
+
+
+_SIX_DIGIT_CODE = re.compile(r"[0-9]{6}")
 
 
 class EastmoneyClient:
@@ -94,41 +98,61 @@ def _subscription_date(record: Mapping[str, Any]) -> date:
 
 def _required_text(record: Mapping[str, Any], field: str) -> str:
     value = record.get(field)
-    if value is None or not str(value).strip():
+    if not isinstance(value, str) or not value.strip():
         raise DataSourceError(f"当日转债缺少关键字段 {field}")
-    return str(value).strip()
+    return value.strip()
 
 
 def _optional_text(record: Mapping[str, Any], field: str) -> str | None:
     value = record.get(field)
-    if value is None or not str(value).strip():
+    if value is None or (isinstance(value, str) and not value.strip()):
         return None
-    return str(value).strip()
+    if not isinstance(value, str):
+        raise DataSourceError(f"字段 {field} 格式错误")
+    return value.strip()
 
 
-def _plain_decimal(value: Any) -> str | None:
-    if value is None or not str(value).strip():
+def _required_code(record: Mapping[str, Any], field: str) -> str:
+    value = _required_text(record, field)
+    if _SIX_DIGIT_CODE.fullmatch(value) is None:
+        raise DataSourceError(f"字段 {field} 必须是六位数字代码")
+    return value
+
+
+def _optional_code(record: Mapping[str, Any], field: str) -> str | None:
+    value = _optional_text(record, field)
+    if value is not None and _SIX_DIGIT_CODE.fullmatch(value) is None:
+        raise DataSourceError(f"字段 {field} 必须是六位数字代码")
+    return value
+
+
+def _plain_decimal(value: Any, field: str) -> str | None:
+    if value is None or (isinstance(value, str) and not value.strip()):
         return None
+    if isinstance(value, bool) or not isinstance(
+        value,
+        (str, int, float, Decimal),
+    ):
+        raise DataSourceError(f"字段 {field} 格式错误")
     try:
         decimal_value = Decimal(str(value))
-    except InvalidOperation:
-        return str(value).strip()
+    except InvalidOperation as exc:
+        raise DataSourceError(f"字段 {field} 不是有效数值") from exc
+    if not decimal_value.is_finite():
+        raise DataSourceError(f"字段 {field} 必须是有限数值")
     return format(decimal_value.normalize(), "f")
 
 
 def _issue_price(value: Any) -> str | None:
-    plain = _plain_decimal(value)
+    plain = _plain_decimal(value, "ISSUE_PRICE")
     return f"{plain} 元" if plain is not None else None
 
 
 def _max_subscription(value: Any) -> str | None:
-    plain = _plain_decimal(value)
+    plain = _plain_decimal(value, "ONLINE_GENERAL_AAU")
     if plain is None:
         return None
-    try:
-        hands = Decimal(plain)
-    except InvalidOperation:
-        return plain
+    hands = Decimal(plain)
     ten_thousand_yuan = hands / Decimal("10")
     return (
         f"{format(hands.normalize(), 'f')} 手"
@@ -147,11 +171,11 @@ def parse_bonds_for_date(
         bonds.append(
             Bond(
                 name=_required_text(record, "SECURITY_NAME_ABBR"),
-                code=_required_text(record, "SECURITY_CODE"),
-                subscribe_code=_optional_text(record, "CORRECODE"),
+                code=_required_code(record, "SECURITY_CODE"),
+                subscribe_code=_optional_code(record, "CORRECODE"),
                 subscribe_date=subscribe_date,
                 stock_name=_optional_text(record, "SECURITY_SHORT_NAME"),
-                stock_code=_optional_text(record, "CONVERT_STOCK_CODE"),
+                stock_code=_optional_code(record, "CONVERT_STOCK_CODE"),
                 issue_price=_issue_price(record.get("ISSUE_PRICE")),
                 max_subscription=_max_subscription(
                     record.get("ONLINE_GENERAL_AAU")

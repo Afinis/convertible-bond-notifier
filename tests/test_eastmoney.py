@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -205,3 +206,110 @@ def test_html_like_text_is_preserved_for_later_escaping() -> None:
     )[0]
 
     assert bond.name == "<测试&转债>"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "SECURITY_NAME_ABBR",
+        "SECURITY_CODE",
+        "CORRECODE",
+        "SECURITY_SHORT_NAME",
+        "CONVERT_STOCK_CODE",
+        "RATING",
+    ],
+)
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(True, id="boolean"),
+        pytest.param(123456, id="integer"),
+        pytest.param(["text"], id="list"),
+        pytest.param({"text": "value"}, id="mapping"),
+        pytest.param(b"text", id="bytes"),
+        pytest.param(object(), id="object"),
+    ],
+)
+def test_matching_record_rejects_non_string_text_fields(
+    field: str,
+    value: Any,
+) -> None:
+    with pytest.raises(DataSourceError, match=field):
+        parse_bonds_for_date(
+            [sample_record(**{field: value})],
+            target_date=date(2022, 1, 5),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("SECURITY_CODE", "11305"),
+        ("SECURITY_CODE", "1130530"),
+        ("SECURITY_CODE", "113O53"),
+        ("CORRECODE", "78301"),
+        ("CORRECODE", "7830120"),
+        ("CORRECODE", "783O12"),
+        ("CONVERT_STOCK_CODE", "60101"),
+        ("CONVERT_STOCK_CODE", "6010120"),
+        ("CONVERT_STOCK_CODE", "601O12"),
+    ],
+)
+def test_matching_record_rejects_malformed_six_digit_codes(
+    field: str,
+    value: str,
+) -> None:
+    with pytest.raises(DataSourceError, match=field):
+        parse_bonds_for_date(
+            [sample_record(**{field: value})],
+            target_date=date(2022, 1, 5),
+        )
+
+
+@pytest.mark.parametrize("field", ["ISSUE_PRICE", "ONLINE_GENERAL_AAU"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(True, id="boolean"),
+        pytest.param(["100"], id="list"),
+        pytest.param({"value": 100}, id="mapping"),
+        pytest.param(b"100", id="bytes"),
+        pytest.param(1 + 2j, id="complex"),
+        pytest.param(object(), id="object"),
+        pytest.param("not-a-number", id="nonnumeric-text"),
+    ],
+)
+def test_matching_record_rejects_invalid_numeric_fields(
+    field: str,
+    value: Any,
+) -> None:
+    with pytest.raises(DataSourceError, match=field):
+        parse_bonds_for_date(
+            [sample_record(**{field: value})],
+            target_date=date(2022, 1, 5),
+        )
+
+
+@pytest.mark.parametrize("field", ["ISSUE_PRICE", "ONLINE_GENERAL_AAU"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(float("nan"), id="float-nan"),
+        pytest.param(float("inf"), id="float-infinity"),
+        pytest.param(float("-inf"), id="float-negative-infinity"),
+        pytest.param("NaN", id="text-nan"),
+        pytest.param("Infinity", id="text-infinity"),
+        pytest.param("-Infinity", id="text-negative-infinity"),
+        pytest.param(Decimal("NaN"), id="decimal-nan"),
+        pytest.param(Decimal("Infinity"), id="decimal-infinity"),
+    ],
+)
+def test_matching_record_rejects_non_finite_numeric_fields(
+    field: str,
+    value: Any,
+) -> None:
+    with pytest.raises(DataSourceError, match=field):
+        parse_bonds_for_date(
+            [sample_record(**{field: value})],
+            target_date=date(2022, 1, 5),
+        )

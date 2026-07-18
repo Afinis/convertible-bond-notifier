@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from .eastmoney import EastmoneyClient
 from .emailer import QQMailer, build_test_message
 from .models import MailConfig
-from .service import NotifierService
+from .service import CheckFailed, NotifierService
 
 
 LOGGER = logging.getLogger("new_bond_notifier")
@@ -62,6 +62,19 @@ def main(
             run_url=github_run_url(actual_env),
         )
         result = notifier.run()
+    except CheckFailed as exc:
+        if exc.notification_error is None:
+            LOGGER.error(
+                "任务失败：主异常=%s",
+                type(exc.cause).__name__,
+            )
+        else:
+            LOGGER.error(
+                "任务失败：主异常=%s；通知异常=%s",
+                type(exc.cause).__name__,
+                type(exc.notification_error).__name__,
+            )
+        return 1
     except Exception as exc:
         LOGGER.error("任务失败：%s", type(exc).__name__)
         return 1

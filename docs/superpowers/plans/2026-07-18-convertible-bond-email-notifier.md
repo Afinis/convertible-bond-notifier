@@ -308,6 +308,7 @@ git commit -m "feat: add notifier models and configuration"
 ```python
 # tests/test_eastmoney.py
 from datetime import date
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -519,6 +520,113 @@ def test_html_like_text_is_preserved_for_later_escaping() -> None:
     )[0]
 
     assert bond.name == "<测试&转债>"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "SECURITY_NAME_ABBR",
+        "SECURITY_CODE",
+        "CORRECODE",
+        "SECURITY_SHORT_NAME",
+        "CONVERT_STOCK_CODE",
+        "RATING",
+    ],
+)
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(True, id="boolean"),
+        pytest.param(123456, id="integer"),
+        pytest.param(["text"], id="list"),
+        pytest.param({"text": "value"}, id="mapping"),
+        pytest.param(b"text", id="bytes"),
+        pytest.param(object(), id="object"),
+    ],
+)
+def test_matching_record_rejects_non_string_text_fields(
+    field: str,
+    value: Any,
+) -> None:
+    with pytest.raises(DataSourceError, match=field):
+        parse_bonds_for_date(
+            [sample_record(**{field: value})],
+            target_date=date(2022, 1, 5),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("SECURITY_CODE", "11305"),
+        ("SECURITY_CODE", "1130530"),
+        ("SECURITY_CODE", "113O53"),
+        ("CORRECODE", "78301"),
+        ("CORRECODE", "7830120"),
+        ("CORRECODE", "783O12"),
+        ("CONVERT_STOCK_CODE", "60101"),
+        ("CONVERT_STOCK_CODE", "6010120"),
+        ("CONVERT_STOCK_CODE", "601O12"),
+    ],
+)
+def test_matching_record_rejects_malformed_six_digit_codes(
+    field: str,
+    value: str,
+) -> None:
+    with pytest.raises(DataSourceError, match=field):
+        parse_bonds_for_date(
+            [sample_record(**{field: value})],
+            target_date=date(2022, 1, 5),
+        )
+
+
+@pytest.mark.parametrize("field", ["ISSUE_PRICE", "ONLINE_GENERAL_AAU"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(True, id="boolean"),
+        pytest.param(["100"], id="list"),
+        pytest.param({"value": 100}, id="mapping"),
+        pytest.param(b"100", id="bytes"),
+        pytest.param(1 + 2j, id="complex"),
+        pytest.param(object(), id="object"),
+        pytest.param("not-a-number", id="nonnumeric-text"),
+    ],
+)
+def test_matching_record_rejects_invalid_numeric_fields(
+    field: str,
+    value: Any,
+) -> None:
+    with pytest.raises(DataSourceError, match=field):
+        parse_bonds_for_date(
+            [sample_record(**{field: value})],
+            target_date=date(2022, 1, 5),
+        )
+
+
+@pytest.mark.parametrize("field", ["ISSUE_PRICE", "ONLINE_GENERAL_AAU"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(float("nan"), id="float-nan"),
+        pytest.param(float("inf"), id="float-infinity"),
+        pytest.param(float("-inf"), id="float-negative-infinity"),
+        pytest.param("NaN", id="text-nan"),
+        pytest.param("Infinity", id="text-infinity"),
+        pytest.param("-Infinity", id="text-negative-infinity"),
+        pytest.param(Decimal("NaN"), id="decimal-nan"),
+        pytest.param(Decimal("Infinity"), id="decimal-infinity"),
+    ],
+)
+def test_matching_record_rejects_non_finite_numeric_fields(
+    field: str,
+    value: Any,
+) -> None:
+    with pytest.raises(DataSourceError, match=field):
+        parse_bonds_for_date(
+            [sample_record(**{field: value})],
+            target_date=date(2022, 1, 5),
+        )
 ```
 
 - [ ] **Step 3: Run the Eastmoney tests and verify the module is missing**
@@ -533,6 +641,7 @@ Expected: collection fails with `ModuleNotFoundError: No module named 'new_bond_
 # src/new_bond_notifier/eastmoney.py
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -547,6 +656,9 @@ from .models import Bond
 
 class DataSourceError(RuntimeError):
     """Raised when Eastmoney cannot provide a trustworthy bond dataset."""
+
+
+_SIX_DIGIT_CODE = re.compile(r"[0-9]{6}")
 
 
 class EastmoneyClient:
@@ -632,41 +744,61 @@ def _subscription_date(record: Mapping[str, Any]) -> date:
 
 def _required_text(record: Mapping[str, Any], field: str) -> str:
     value = record.get(field)
-    if value is None or not str(value).strip():
+    if not isinstance(value, str) or not value.strip():
         raise DataSourceError(f"当日转债缺少关键字段 {field}")
-    return str(value).strip()
+    return value.strip()
 
 
 def _optional_text(record: Mapping[str, Any], field: str) -> str | None:
     value = record.get(field)
-    if value is None or not str(value).strip():
+    if value is None or (isinstance(value, str) and not value.strip()):
         return None
-    return str(value).strip()
+    if not isinstance(value, str):
+        raise DataSourceError(f"字段 {field} 格式错误")
+    return value.strip()
 
 
-def _plain_decimal(value: Any) -> str | None:
-    if value is None or not str(value).strip():
+def _required_code(record: Mapping[str, Any], field: str) -> str:
+    value = _required_text(record, field)
+    if _SIX_DIGIT_CODE.fullmatch(value) is None:
+        raise DataSourceError(f"字段 {field} 必须是六位数字代码")
+    return value
+
+
+def _optional_code(record: Mapping[str, Any], field: str) -> str | None:
+    value = _optional_text(record, field)
+    if value is not None and _SIX_DIGIT_CODE.fullmatch(value) is None:
+        raise DataSourceError(f"字段 {field} 必须是六位数字代码")
+    return value
+
+
+def _plain_decimal(value: Any, field: str) -> str | None:
+    if value is None or (isinstance(value, str) and not value.strip()):
         return None
+    if isinstance(value, bool) or not isinstance(
+        value,
+        (str, int, float, Decimal),
+    ):
+        raise DataSourceError(f"字段 {field} 格式错误")
     try:
         decimal_value = Decimal(str(value))
-    except InvalidOperation:
-        return str(value).strip()
+    except InvalidOperation as exc:
+        raise DataSourceError(f"字段 {field} 不是有效数值") from exc
+    if not decimal_value.is_finite():
+        raise DataSourceError(f"字段 {field} 必须是有限数值")
     return format(decimal_value.normalize(), "f")
 
 
 def _issue_price(value: Any) -> str | None:
-    plain = _plain_decimal(value)
+    plain = _plain_decimal(value, "ISSUE_PRICE")
     return f"{plain} 元" if plain is not None else None
 
 
 def _max_subscription(value: Any) -> str | None:
-    plain = _plain_decimal(value)
+    plain = _plain_decimal(value, "ONLINE_GENERAL_AAU")
     if plain is None:
         return None
-    try:
-        hands = Decimal(plain)
-    except InvalidOperation:
-        return plain
+    hands = Decimal(plain)
     ten_thousand_yuan = hands / Decimal("10")
     return (
         f"{format(hands.normalize(), 'f')} 手"
@@ -685,11 +817,11 @@ def parse_bonds_for_date(
         bonds.append(
             Bond(
                 name=_required_text(record, "SECURITY_NAME_ABBR"),
-                code=_required_text(record, "SECURITY_CODE"),
-                subscribe_code=_optional_text(record, "CORRECODE"),
+                code=_required_code(record, "SECURITY_CODE"),
+                subscribe_code=_optional_code(record, "CORRECODE"),
                 subscribe_date=subscribe_date,
                 stock_name=_optional_text(record, "SECURITY_SHORT_NAME"),
-                stock_code=_optional_text(record, "CONVERT_STOCK_CODE"),
+                stock_code=_optional_code(record, "CONVERT_STOCK_CODE"),
                 issue_price=_issue_price(record.get("ISSUE_PRICE")),
                 max_subscription=_max_subscription(
                     record.get("ONLINE_GENERAL_AAU")
@@ -730,6 +862,7 @@ git commit -m "feat: fetch and filter Eastmoney bond data"
 
 ```python
 # tests/test_emailer.py
+import ssl
 from datetime import date, datetime
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo
@@ -822,7 +955,11 @@ def test_missing_optional_fields_are_rendered_as_dash() -> None:
 def test_failure_message_exposes_type_but_not_error_text_or_auth_code() -> None:
     message = build_failure_message(
         CONFIG,
-        RuntimeError("secret-auth-code must never appear"),
+        RuntimeError(
+            "RAW_API_RESPONSE={'secret': true}; "
+            "SMTP_AUTH_CODE=secret-auth-code; "
+            "MAIL_TO=private@example.com"
+        ),
         RUN_AT,
         "https://github.com/example/repo/actions/runs/123",
     )
@@ -831,8 +968,14 @@ def test_failure_message_exposes_type_but_not_error_text_or_auth_code() -> None:
     assert message["Subject"] == "[新债提醒任务异常] 2022-01-05"
     assert "RuntimeError" in plain
     assert "https://github.com/example/repo/actions/runs/123" in html
-    assert "secret-auth-code" not in plain
-    assert "secret-auth-code" not in html
+    for marker in (
+        "RAW_API_RESPONSE",
+        "SMTP_AUTH_CODE",
+        "MAIL_TO=",
+        CONFIG.smtp_auth_code,
+    ):
+        assert marker not in plain
+        assert marker not in html
 
 
 def test_test_message_is_unambiguously_not_a_real_subscription() -> None:
@@ -842,6 +985,14 @@ def test_test_message_is_unambiguously_not_a_real_subscription() -> None:
     assert message["Subject"] == "[新债提醒测试] 邮件配置正常"
     assert "不代表当天存在可申购转债" in plain
     assert "不代表当天存在可申购转债" in html
+    for marker in (
+        "RAW_API_RESPONSE",
+        "SMTP_AUTH_CODE",
+        "MAIL_TO=",
+        CONFIG.smtp_auth_code,
+    ):
+        assert marker not in plain
+        assert marker not in html
 ```
 
 - [ ] **Step 2: Add a failing SMTP transport test**
@@ -852,10 +1003,17 @@ Append to `tests/test_emailer.py`:
 class StubSMTP:
     instances: list["StubSMTP"] = []
 
-    def __init__(self, host: str, port: int, timeout: int) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        timeout: int,
+        context: ssl.SSLContext,
+    ) -> None:
         self.host = host
         self.port = port
         self.timeout = timeout
+        self.context = context
         self.login_args: tuple[str, str] | None = None
         self.sent: EmailMessage | None = None
         StubSMTP.instances.append(self)
@@ -873,7 +1031,7 @@ class StubSMTP:
         self.sent = message
 
 
-def test_qq_mailer_uses_ssl_465_and_authorization_code() -> None:
+def test_qq_mailer_uses_verified_ssl_465_and_authorization_code() -> None:
     StubSMTP.instances.clear()
     message = build_subscription_message(CONFIG, [bond()], RUN_AT)
     mailer = QQMailer(CONFIG, smtp_factory=StubSMTP)
@@ -884,6 +1042,8 @@ def test_qq_mailer_uses_ssl_465_and_authorization_code() -> None:
     assert smtp.host == "smtp.qq.com"
     assert smtp.port == 465
     assert smtp.timeout == 20
+    assert smtp.context.verify_mode == ssl.CERT_REQUIRED
+    assert smtp.context.check_hostname is True
     assert smtp.login_args == ("sender@qq.com", "secret-auth-code")
     assert smtp.sent is message
 ```
@@ -902,6 +1062,7 @@ from __future__ import annotations
 
 import html
 import smtplib
+import ssl
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from email.message import EmailMessage
@@ -1090,8 +1251,12 @@ class QQMailer:
         self.smtp_factory = smtp_factory
 
     def send(self, message: EmailMessage) -> None:
+        context = ssl.create_default_context()
         with self.smtp_factory(
-            "smtp.qq.com", 465, timeout=20
+            "smtp.qq.com",
+            465,
+            timeout=20,
+            context=context,
         ) as smtp:
             smtp.login(
                 self.config.smtp_username,
@@ -1347,6 +1512,31 @@ def test_malformed_matching_record_sends_one_failure_email() -> None:
     assert raised.value.notification_error is None
     assert len(mailer.messages) == 1
     assert "任务异常" in str(mailer.messages[0]["Subject"])
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("SECURITY_SHORT_NAME", ["not", "text"]),
+        ("CORRECODE", "12345"),
+        ("ISSUE_PRICE", float("inf")),
+    ],
+)
+def test_malformed_matching_field_sends_exactly_one_failure_email(
+    field: str,
+    value: Any,
+) -> None:
+    malformed = record("格式异常转债")
+    malformed[field] = value
+    mailer = StubMailer()
+
+    with pytest.raises(CheckFailed) as raised:
+        service(StubClient([malformed]), mailer).run(NOW)
+
+    assert isinstance(raised.value.cause, DataSourceError)
+    assert raised.value.notification_error is None
+    assert len(mailer.messages) == 1
+    assert "任务异常" in str(mailer.messages[0]["Subject"])
 ```
 
 - [ ] **Step 3: Run the service tests and verify the module is missing**
@@ -1485,12 +1675,14 @@ git commit -m "feat: orchestrate daily bond notifications"
 ```python
 # tests/test_cli.py
 import logging
-from collections.abc import Mapping
 from datetime import date
 from typing import Any
 
+import pytest
+
 from new_bond_notifier.cli import github_run_url, main
-from new_bond_notifier.service import RunResult
+from new_bond_notifier.models import Bond
+from new_bond_notifier.service import CheckFailed, RunResult
 
 
 VALID_ENV = {
@@ -1532,6 +1724,42 @@ class FailingService:
         raise RuntimeError("super-secret-code")
 
 
+class SentBondService:
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+
+    def run(self) -> RunResult:
+        bond = Bond(
+            name="测试转债",
+            code="123456",
+            subscribe_code="654321",
+            subscribe_date=date(2022, 1, 5),
+            stock_name="测试股份",
+            stock_code="601012",
+            issue_price="100 元",
+            max_subscription="1000 手（100 万元）",
+            rating="AAA",
+        )
+        return RunResult(date(2022, 1, 5), (bond,), True)
+
+
+class CheckFailedService:
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+
+    def run(self) -> RunResult:
+        raise CheckFailed(
+            RuntimeError("raw response must stay secret"),
+            OSError("super-secret-code"),
+        )
+
+
+class FailingTestMailer(FakeMailer):
+    def send(self, message: object) -> None:
+        super().send(message)
+        raise OSError("super-secret-code")
+
+
 def test_github_run_url_is_built_only_when_all_parts_exist() -> None:
     assert (
         github_run_url(
@@ -1544,6 +1772,29 @@ def test_github_run_url_is_built_only_when_all_parts_exist() -> None:
         == "https://github.com/example/repo/actions/runs/123"
     )
     assert github_run_url({}) is None
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_REPOSITORY": "example/repo",
+        },
+        {
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_RUN_ID": "123",
+        },
+        {
+            "GITHUB_REPOSITORY": "example/repo",
+            "GITHUB_RUN_ID": "123",
+        },
+    ],
+)
+def test_github_run_url_rejects_every_two_of_three_partial_combination(
+    env: dict[str, str],
+) -> None:
+    assert github_run_url(env) is None
 
 
 def test_main_returns_one_for_missing_configuration(caplog: Any) -> None:
@@ -1569,6 +1820,21 @@ def test_main_returns_zero_for_successful_no_bond_run(caplog: Any) -> None:
     assert "无需发送" in caplog.text
 
 
+def test_main_logs_sent_bond_count_on_success(caplog: Any) -> None:
+    with caplog.at_level(logging.INFO):
+        exit_code = main(
+            env=VALID_ENV,
+            client_factory=FakeClient,
+            mailer_factory=FakeMailer,
+            service_factory=SentBondService,
+        )
+
+    assert exit_code == 0
+    assert "2022-01-05" in caplog.text
+    assert "1 只可申购转债" in caplog.text
+    assert "提醒邮件已发送" in caplog.text
+
+
 def test_main_sends_explicit_test_email_without_calling_data_client(
     caplog: Any,
 ) -> None:
@@ -1592,6 +1858,38 @@ def test_main_sends_explicit_test_email_without_calling_data_client(
         str(FakeMailer.instances[0].messages[0]["Subject"])
         == "[新债提醒测试] 邮件配置正常"
     )
+
+
+def test_test_email_smtp_failure_is_sanitized(caplog: Any) -> None:
+    with caplog.at_level(logging.ERROR):
+        exit_code = main(
+            env={**VALID_ENV, "SEND_TEST_EMAIL": "true"},
+            client_factory=FakeClient,
+            mailer_factory=FailingTestMailer,
+            service_factory=SuccessfulService,
+        )
+
+    assert exit_code == 1
+    assert "OSError" in caplog.text
+    assert "super-secret-code" not in caplog.text
+
+
+def test_check_failed_log_names_only_primary_and_notification_types(
+    caplog: Any,
+) -> None:
+    with caplog.at_level(logging.ERROR):
+        exit_code = main(
+            env=VALID_ENV,
+            client_factory=FakeClient,
+            mailer_factory=FakeMailer,
+            service_factory=CheckFailedService,
+        )
+
+    assert exit_code == 1
+    assert "RuntimeError" in caplog.text
+    assert "OSError" in caplog.text
+    assert "raw response must stay secret" not in caplog.text
+    assert "super-secret-code" not in caplog.text
 
 
 def test_main_never_logs_exception_text_that_might_contain_secret(
@@ -1632,7 +1930,7 @@ from zoneinfo import ZoneInfo
 from .eastmoney import EastmoneyClient
 from .emailer import QQMailer, build_test_message
 from .models import MailConfig
-from .service import NotifierService
+from .service import CheckFailed, NotifierService
 
 
 LOGGER = logging.getLogger("new_bond_notifier")
@@ -1686,6 +1984,19 @@ def main(
             run_url=github_run_url(actual_env),
         )
         result = notifier.run()
+    except CheckFailed as exc:
+        if exc.notification_error is None:
+            LOGGER.error(
+                "任务失败：主异常=%s",
+                type(exc.cause).__name__,
+            )
+        else:
+            LOGGER.error(
+                "任务失败：主异常=%s；通知异常=%s",
+                type(exc.cause).__name__,
+                type(exc.notification_error).__name__,
+            )
+        return 1
     except Exception as exc:
         LOGGER.error("任务失败：%s", type(exc).__name__)
         return 1
@@ -1772,6 +2083,7 @@ def test_test_workflow_runs_pytest_on_push_and_pull_request() -> None:
     assert 'python -m pip install -e ".[test]"' in workflow
     assert "python -m pytest -v" in workflow
     assert "contents: read" in workflow
+    assert "runs-on: ubuntu-latest" in workflow
 
 
 def test_notifier_workflow_uses_beijing_0930_and_manual_trigger() -> None:
@@ -1781,9 +2093,22 @@ def test_notifier_workflow_uses_beijing_0930_and_manual_trigger() -> None:
     assert "timezone: Asia/Shanghai" in workflow
     assert "workflow_dispatch:" in workflow
     assert "send_test_email:" in workflow
-    assert "type: boolean" in workflow
+    test_email_input = workflow.split("send_test_email:", 1)[1].split(
+        "\n\npermissions:", 1
+    )[0]
+    assert "type: boolean" in test_email_input
+    assert "default: false" in test_email_input
+    assert "required: true" in test_email_input
     assert "python -m pytest -v" in workflow
     assert "python -m new_bond_notifier" in workflow
+    assert workflow.index("python -m pytest -v") < workflow.index(
+        "python -m new_bond_notifier"
+    )
+    assert "runs-on: ubuntu-latest" in workflow
+    assert "timeout-minutes: 10" in workflow
+    assert "concurrency:" in workflow
+    assert "group: new-bond-notifier" in workflow
+    assert "cancel-in-progress: false" in workflow
 
 
 def test_notifier_workflow_wires_only_named_mail_secrets() -> None:
@@ -1792,7 +2117,12 @@ def test_notifier_workflow_wires_only_named_mail_secrets() -> None:
     assert "SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}" in workflow
     assert "SMTP_AUTH_CODE: ${{ secrets.SMTP_AUTH_CODE }}" in workflow
     assert "MAIL_TO: ${{ secrets.MAIL_TO }}" in workflow
-    assert "SEND_TEST_EMAIL: ${{ inputs.send_test_email }}" in workflow
+    assert (
+        "SEND_TEST_EMAIL: "
+        "${{ github.event_name == 'workflow_dispatch' "
+        "&& inputs.send_test_email }}"
+    ) in workflow
+    assert "SEND_TEST_EMAIL: true" not in workflow
     assert "contents: read" in workflow
     assert "contents: write" not in workflow
 ```
@@ -1879,7 +2209,7 @@ jobs:
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_AUTH_CODE: ${{ secrets.SMTP_AUTH_CODE }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
-          SEND_TEST_EMAIL: ${{ inputs.send_test_email }}
+          SEND_TEST_EMAIL: ${{ github.event_name == 'workflow_dispatch' && inputs.send_test_email }}
         run: python -m new_bond_notifier
 ```
 

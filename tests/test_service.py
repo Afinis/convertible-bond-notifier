@@ -213,3 +213,28 @@ def test_malformed_matching_record_sends_one_failure_email() -> None:
     assert raised.value.notification_error is None
     assert len(mailer.messages) == 1
     assert "任务异常" in str(mailer.messages[0]["Subject"])
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("SECURITY_SHORT_NAME", ["not", "text"]),
+        ("CORRECODE", "12345"),
+        ("ISSUE_PRICE", float("inf")),
+    ],
+)
+def test_malformed_matching_field_sends_exactly_one_failure_email(
+    field: str,
+    value: Any,
+) -> None:
+    malformed = record("格式异常转债")
+    malformed[field] = value
+    mailer = StubMailer()
+
+    with pytest.raises(CheckFailed) as raised:
+        service(StubClient([malformed]), mailer).run(NOW)
+
+    assert isinstance(raised.value.cause, DataSourceError)
+    assert raised.value.notification_error is None
+    assert len(mailer.messages) == 1
+    assert "任务异常" in str(mailer.messages[0]["Subject"])

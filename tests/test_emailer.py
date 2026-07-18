@@ -1,3 +1,4 @@
+import ssl
 from datetime import date, datetime
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo
@@ -90,7 +91,11 @@ def test_missing_optional_fields_are_rendered_as_dash() -> None:
 def test_failure_message_exposes_type_but_not_error_text_or_auth_code() -> None:
     message = build_failure_message(
         CONFIG,
-        RuntimeError("secret-auth-code must never appear"),
+        RuntimeError(
+            "RAW_API_RESPONSE={'secret': true}; "
+            "SMTP_AUTH_CODE=secret-auth-code; "
+            "MAIL_TO=private@example.com"
+        ),
         RUN_AT,
         "https://github.com/example/repo/actions/runs/123",
     )
@@ -99,8 +104,14 @@ def test_failure_message_exposes_type_but_not_error_text_or_auth_code() -> None:
     assert message["Subject"] == "[新债提醒任务异常] 2022-01-05"
     assert "RuntimeError" in plain
     assert "https://github.com/example/repo/actions/runs/123" in html
-    assert "secret-auth-code" not in plain
-    assert "secret-auth-code" not in html
+    for marker in (
+        "RAW_API_RESPONSE",
+        "SMTP_AUTH_CODE",
+        "MAIL_TO=",
+        CONFIG.smtp_auth_code,
+    ):
+        assert marker not in plain
+        assert marker not in html
 
 
 def test_test_message_is_unambiguously_not_a_real_subscription() -> None:
@@ -110,15 +121,30 @@ def test_test_message_is_unambiguously_not_a_real_subscription() -> None:
     assert message["Subject"] == "[新债提醒测试] 邮件配置正常"
     assert "不代表当天存在可申购转债" in plain
     assert "不代表当天存在可申购转债" in html
+    for marker in (
+        "RAW_API_RESPONSE",
+        "SMTP_AUTH_CODE",
+        "MAIL_TO=",
+        CONFIG.smtp_auth_code,
+    ):
+        assert marker not in plain
+        assert marker not in html
 
 
 class StubSMTP:
     instances: list["StubSMTP"] = []
 
-    def __init__(self, host: str, port: int, timeout: int) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        timeout: int,
+        context: ssl.SSLContext,
+    ) -> None:
         self.host = host
         self.port = port
         self.timeout = timeout
+        self.context = context
         self.login_args: tuple[str, str] | None = None
         self.sent: EmailMessage | None = None
         StubSMTP.instances.append(self)
@@ -136,7 +162,7 @@ class StubSMTP:
         self.sent = message
 
 
-def test_qq_mailer_uses_ssl_465_and_authorization_code() -> None:
+def test_qq_mailer_uses_verified_ssl_465_and_authorization_code() -> None:
     StubSMTP.instances.clear()
     message = build_subscription_message(CONFIG, [bond()], RUN_AT)
     mailer = QQMailer(CONFIG, smtp_factory=StubSMTP)
@@ -147,5 +173,7 @@ def test_qq_mailer_uses_ssl_465_and_authorization_code() -> None:
     assert smtp.host == "smtp.qq.com"
     assert smtp.port == 465
     assert smtp.timeout == 20
+    assert smtp.context.verify_mode == ssl.CERT_REQUIRED
+    assert smtp.context.check_hostname is True
     assert smtp.login_args == ("sender@qq.com", "secret-auth-code")
     assert smtp.sent is message

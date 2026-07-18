@@ -40,5 +40,5 @@ jobs:
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_AUTH_CODE: ${{ secrets.SMTP_AUTH_CODE }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
-          SEND_TEST_EMAIL: ${{ inputs.send_test_email }}
+          SEND_TEST_EMAIL: ${{ github.event_name == 'workflow_dispatch' && inputs.send_test_email }}
         run: python -m new_bond_notifier

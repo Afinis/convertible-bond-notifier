@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import smtplib
+import ssl
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from email.message import EmailMessage
@@ -185,7 +186,13 @@ class QQMailer:
         self.smtp_factory = smtp_factory
 
     def send(self, message: EmailMessage) -> None:
-        with self.smtp_factory("smtp.qq.com", 465, timeout=20) as smtp:
+        context = ssl.create_default_context()
+        with self.smtp_factory(
+            "smtp.qq.com",
+            465,
+            timeout=20,
+            context=context,
+        ) as smtp:
             smtp.login(
                 self.config.smtp_username,
                 self.config.smtp_auth_code,
