@@ -53,6 +53,10 @@ class NotifierService:
         self.run_url = run_url
 
     def run(self, now: datetime | None = None) -> RunResult:
+        if now is not None and (
+            now.tzinfo is None or now.utcoffset() is None
+        ):
+            raise ValueError("now must be timezone-aware")
         run_at = now.astimezone(CN_TZ) if now else datetime.now(CN_TZ)
         checked_date = run_at.date()
 
@@ -60,13 +64,13 @@ class NotifierService:
             records = self.client.fetch_records()
             bonds = parse_bonds_for_date(records, checked_date)
         except Exception as cause:
-            failure_message = build_failure_message(
-                self.config,
-                cause,
-                run_at,
-                self.run_url,
-            )
             try:
+                failure_message = build_failure_message(
+                    self.config,
+                    cause,
+                    run_at,
+                    self.run_url,
+                )
                 self.mailer.send(failure_message)
             except Exception as notification_error:
                 raise CheckFailed(cause, notification_error) from cause
