@@ -185,6 +185,7 @@ addopts = "-ra"
 
 ```gitignore
 # .gitignore
+.worktrees/
 __pycache__/
 *.py[cod]
 .pytest_cache/
