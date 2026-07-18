@@ -411,7 +411,14 @@ def test_default_session_has_three_total_transient_attempts() -> None:
     assert retry.total == 2
     assert retry.connect == 2
     assert retry.read == 2
-    assert set(retry.status_forcelist) == {429, 500, 502, 503, 504}
+
+
+def test_default_session_retries_429_and_every_5xx_status() -> None:
+    client = EastmoneyClient()
+    retry = client.session.get_adapter("https://").max_retries
+
+    assert retry.total == 2
+    assert set(retry.status_forcelist) == {429, *range(500, 600)}
 ```
 
 - [ ] **Step 2: Add failing field-mapping and date-filter tests**
@@ -486,7 +493,14 @@ def test_matching_record_requires_critical_identity_fields(
 
 @pytest.mark.parametrize(
     "raw_date",
-    [None, "", "not-a-date", "2022-13-99 00:00:00"],
+    [
+        None,
+        "",
+        "not-a-date",
+        "2022-13-99 00:00:00",
+        "2022-01-05garbage",
+        "2022-01-05 99:99:99",
+    ],
 )
 def test_every_record_requires_a_parseable_subscription_date(
     raw_date: Any,
@@ -520,7 +534,7 @@ Expected: collection fails with `ModuleNotFoundError: No module named 'new_bond_
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -549,7 +563,7 @@ class EastmoneyClient:
             read=2,
             status=2,
             backoff_factor=0.5,
-            status_forcelist=(429, 500, 502, 503, 504),
+            status_forcelist=(429, *range(500, 600)),
             allowed_methods=frozenset({"GET"}),
             raise_on_status=True,
         )
@@ -608,10 +622,10 @@ Append to `src/new_bond_notifier/eastmoney.py`:
 ```python
 def _subscription_date(record: Mapping[str, Any]) -> date:
     raw = record.get("PUBLIC_START_DATE")
-    if not isinstance(raw, str) or len(raw) < 10:
+    if not isinstance(raw, str) or not raw.strip():
         raise DataSourceError("字段 PUBLIC_START_DATE 缺失或格式错误")
     try:
-        return date.fromisoformat(raw[:10])
+        return datetime.fromisoformat(raw.strip()).date()
     except ValueError as exc:
         raise DataSourceError("字段 PUBLIC_START_DATE 无法解析") from exc
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -30,7 +30,7 @@ class EastmoneyClient:
             read=2,
             status=2,
             backoff_factor=0.5,
-            status_forcelist=(429, 500, 502, 503, 504),
+            status_forcelist=(429, *range(500, 600)),
             allowed_methods=frozenset({"GET"}),
             raise_on_status=True,
         )
@@ -84,10 +84,10 @@ class EastmoneyClient:
 
 def _subscription_date(record: Mapping[str, Any]) -> date:
     raw = record.get("PUBLIC_START_DATE")
-    if not isinstance(raw, str) or len(raw) < 10:
+    if not isinstance(raw, str) or not raw.strip():
         raise DataSourceError("字段 PUBLIC_START_DATE 缺失或格式错误")
     try:
-        return date.fromisoformat(raw[:10])
+        return datetime.fromisoformat(raw.strip()).date()
     except ValueError as exc:
         raise DataSourceError("字段 PUBLIC_START_DATE 无法解析") from exc
 

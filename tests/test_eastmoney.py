@@ -102,7 +102,14 @@ def test_default_session_has_three_total_transient_attempts() -> None:
     assert retry.total == 2
     assert retry.connect == 2
     assert retry.read == 2
-    assert set(retry.status_forcelist) == {429, 500, 502, 503, 504}
+
+
+def test_default_session_retries_429_and_every_5xx_status() -> None:
+    client = EastmoneyClient()
+    retry = client.session.get_adapter("https://").max_retries
+
+    assert retry.total == 2
+    assert set(retry.status_forcelist) == {429, *range(500, 600)}
 
 
 def test_parse_bonds_for_date_maps_all_display_fields() -> None:
@@ -172,7 +179,14 @@ def test_matching_record_requires_critical_identity_fields(
 
 @pytest.mark.parametrize(
     "raw_date",
-    [None, "", "not-a-date", "2022-13-99 00:00:00"],
+    [
+        None,
+        "",
+        "not-a-date",
+        "2022-13-99 00:00:00",
+        "2022-01-05garbage",
+        "2022-01-05 99:99:99",
+    ],
 )
 def test_every_record_requires_a_parseable_subscription_date(
     raw_date: Any,
