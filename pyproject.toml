@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "new-bond-notifier"
 version = "0.1.0"
 description = "A-share convertible bond subscription email notifier"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "requests>=2.32,<3",
